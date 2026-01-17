@@ -1,0 +1,39 @@
+name: Ilan Kontrol Botu
+
+on:
+  schedule:
+    - cron: '0 */4 * * *' # Her 4 saatte bir çalışır
+  workflow_dispatch: # İstediğin zaman elle çalıştırma butonu ekler
+
+permissions:
+  contents: write # Veritabanı dosyasını güncellemek için izin
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium
+
+      - name: Run bot
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python bot.py
+
+      - name: Save state
+        run: |
+          git config --global user.name "Bot"
+          git config --global user.email "bot@github.com"
+          git add ilanlar_veritabani.json
+          git commit -m "Veritabanı güncellendi" || echo "Değişiklik yok"
+          git push
