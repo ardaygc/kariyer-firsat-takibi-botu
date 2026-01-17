@@ -4,11 +4,17 @@ import json
 import os
 import requests
 from urllib.parse import urljoin
-import re
+import google.generativeai as genai
 
-# GitHub Secrets
+# API ve Gizli Bilgiler
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.environ.get("CHAT_ID", "").strip()
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+
+# Gemini Ayarı
+if GEMINI_KEY:
+    genai.configure(api_key=GEMINI_KEY)
+    ai_model = genai.GenerativeModel('gemini-1.5-flash')
 
 SITELER = [
     {
@@ -16,47 +22,50 @@ SITELER = [
         "url": "https://anbeankampus.co/ilanlar/", 
         "card": ".joblistings-jobItem", 
         "title": "h6", 
-        "link": "a",
-        "deep_scrape": False # Tarih ana sayfada var
+        "link": "a"
     },
     {
         "isim": "Coderspace", 
         "url": "https://coderspace.io/etkinlikler", 
         "card": ".event-card", 
         "title": "h5", 
-        "link": "h5 a",
-        "deep_scrape": False 
+        "link": "h5 a"
     },
     {
         "isim": "Youthall", 
         "url": "https://www.youthall.com/tr/jobs/", 
         "card": ".jobs", 
         "title": "h5", 
-        "link": "a",
-        "deep_scrape": False
+        "link": "a"
     },
     {
         "isim": "Boomerang", 
         "url": "https://www.boomerang.careers/career-events", 
-        "card": ".grid > div", 
+        "card": "div.grid > div", 
         "title": "h3", 
-        "link": "a[href*='/']",
-        "deep_scrape": True # İçeri girip tarih araması yapacak
+        "link": "a"
     }
 ]
 
 DB_FILE = "ilanlar_veritabani.json"
 
-async def get_deadline_from_page(page, url):
-    """İlanın içine girip tarih arayan fonksiyon"""
+async def ai_ile_analiz_et(metin):
+    """NLP kullanarak ilan metnini analiz eder"""
+    if not GEMINI_KEY: return "NLP Analizi Devre Dışı (API Key Yok)"
     try:
-        await page.goto(url, wait_until="networkidle", timeout=30000)
-        content = await page.content()
-        # Sayfa içinde tarih olabilecek kalıpları ara
-        match = re.search(r'(\d{1,2}\s+(Ocak|Şubat|Mart|Nisan|Mayıs|Haziran|Temmuz|Ağustos|Eylül|Ekim|Kasım|Aralık))', content)
-        return match.group(0) if match else "Detayda belirtilmiş"
+        prompt = f"""
+        Aşağıdaki iş/etkinlik ilanı metnini analiz et. 
+        Sadece şu 3 bilgiyi kısa ve net olarak Türkçe ver:
+        1. Son Başvuru Tarihi: (Bulamazsan 'Belirtilmemiş' yaz)
+        2. Kimler Başvurabilir: (Sınıf ve bölüm kriteri)
+        3. Özet: (Tek cümlelik görev tanımı)
+        
+        İlan Metni: {metin[:3000]}
+        """
+        response = ai_model.generate_content(prompt)
+        return response.text
     except:
-        return "Belirtilmemiş"
+        return "NLP analizi sırasında hata oluştu."
 
 async def telegram_send(mesaj):
     if not mesaj or not TELEGRAM_TOKEN: return
@@ -70,21 +79,26 @@ async def main():
     else: arsiv = {}
 
     yeni_ilanlar = []
-    
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        # Daha zengin bir User-Agent (Engellenmemek için)
+        context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         
         for site in SITELER:
             page = await context.new_page()
             try:
                 print(f"🔎 {site['isim']} taranıyor...")
                 await page.goto(site['url'], wait_until="networkidle", timeout=60000)
-                await page.wait_for_timeout(3000)
                 
+                # Dinamik içeriklerin yüklenmesi için scroll ve bekleme
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
+                await page.wait_for_timeout(5000) 
+
                 cards = await page.query_selector_all(site['card'])
-                
-                for card in cards[:12]: # Hız için her siteden en güncel 12 ilanı alıyoruz
+                print(f"📊 {site['isim']}: {len(cards)} ilan bulundu.")
+
+                # Zaman aşımı riskine karşı her siteden en güncel 5 ilanı alıyoruz
+                for card in cards[:5]:
                     t_el = await card.query_selector(site['title'])
                     l_el = await card.query_selector(site['link'])
                     
@@ -95,41 +109,38 @@ async def main():
                     if title and len(title) > 2:
                         key = f"{site['isim']}-{title}"
                         if key not in arsiv:
-                            date = "İçeride aranıyor..."
-                            if site['deep_scrape']:
-                                # Derin tarama modu aktifse ilanın içine gir
-                                date = await get_deadline_from_page(page, full_link)
-                                await page.goto(site['url'], wait_until="networkidle") # Ana sayfaya geri dön
-                            else:
-                                # Normal modda ana sayfadaki tarih bilgisini çek
-                                d_el = await card.query_selector("span[class*='date'], .date, .time")
-                                date = (await d_el.inner_text()).strip() if d_el else "Belirtilmemiş"
-
-                            detay = f"📌 *{site['isim']}*\n📝 *{title}*\n⏳ Son Başvuru: {date}\n🔗 [İlana Git]({full_link})"
+                            print(f"🧠 {title} NLP ile analiz ediliyor...")
+                            # İlanın içine girip tüm metni çek
+                            await page.goto(full_link, wait_until="domcontentloaded")
+                            full_text = await page.inner_text("body")
+                            
+                            # Gemini ile NLP analizi
+                            ai_analiz = await ai_ile_analiz_et(full_text)
+                            
+                            detay = f"📌 *{site['isim']}*\n📝 *{title}*\n\n🤖 **AI ANALİZİ:**\n{ai_analiz}\n\n🔗 [Detay ve Başvuru İçin Tıkla]({full_link})"
                             yeni_ilanlar.append(detay)
-                            arsiv[key] = date
+                            arsiv[key] = "kaydedildi"
+                            
+                            # Geri dön
+                            await page.goto(site['url'], wait_until="domcontentloaded")
+
             except Exception as e: print(f"⚠️ {site['isim']} Hatası: {e}")
             finally: await page.close()
         await browser.close()
 
-    # --- TOPLU MESAJ MANTIĞI ---
+    # Toplu mesaj gönderme (4000 karakter sınırı kontrolüyle)
     if yeni_ilanlar:
-        mesaj_blogu = "🚀 **GÜNCEL FIRSATLAR LİSTESİ**\n\n"
+        mesaj_blogu = "🚀 **YAPAY ZEKA DESTEKLİ KARİYER RAPORU**\n\n"
         for ilan in yeni_ilanlar:
-            # Eğer mevcut mesaj bloğu 4000 karaktere yaklaşırsa gönder ve yeni blok başlat
-            if len(mesaj_blogu + ilan) > 3900:
+            if len(mesaj_blogu + ilan) > 3800:
                 await telegram_send(mesaj_blogu)
                 mesaj_blogu = "🚀 **LİSTE DEVAMI**\n\n"
-            
             mesaj_blogu += ilan + "\n\n---\n\n"
-        
-        # Kalan son bloğu gönder
         await telegram_send(mesaj_blogu)
         
         with open(DB_FILE, "w", encoding="utf-8") as f:
             json.dump(arsiv, f, indent=4, ensure_ascii=False)
-    else:
-        print("😴 Yeni ilan yok.")
+    else: print("😴 Yeni bir şey yok.")
 
 if __name__ == "__main__":
     asyncio.run(main())
