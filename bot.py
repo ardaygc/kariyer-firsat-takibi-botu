@@ -22,6 +22,7 @@ async def telegram_send(mesaj):
     requests.post(url, data={"chat_id": CHAT_ID, "text": mesaj, "parse_mode": "Markdown"})
 
 async def main():
+    await telegram_send("🤖 Bot tarama işlemine başladı...")
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r") as f: arsiv = json.load(f)
     else: arsiv = {}
