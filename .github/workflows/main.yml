@@ -34,8 +34,13 @@ jobs:
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
-          git fetch origin main
-          git pull --rebase origin main # Uzaktaki değişiklikleri (varsa) çek ve kendi değişikliğini üzerine ekle
+          
+          # Önce yapılan değişiklikleri stageler ve commitleyip güvene alırız
           git add ilanlar_veritabani.json
-          git commit -m "Veritabanı güncellendi" || echo "Değişiklik yok"
+          git commit -m "Veritabanı güncellendi [skip ci]" || echo "Değişiklik yok"
+          
+          # Şimdi güvenle pull --rebase yapabiliriz çünkü working tree artık clean
+          git pull --rebase origin main
+          
+          # Son olarak her şeyi pushlarız
           git push origin main
