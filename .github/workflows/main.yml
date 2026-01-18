@@ -44,3 +44,10 @@ jobs:
           
           # Son olarak her şeyi pushlarız
           git push origin main
+          
+      - name: Hata Ekran Görüntülerini Yükle
+        if: always() # Bot hata alsa da almasa da bu adımı çalıştır
+        uses: actions/upload-artifact@v4
+        with:
+          name: hata-ekran-goruntuleri
+          path: "*.png" # Klasördeki tüm .png dosyalarını topla  
