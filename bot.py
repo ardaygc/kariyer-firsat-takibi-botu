@@ -6,12 +6,11 @@ import requests
 from urllib.parse import urljoin
 from google import genai
 
-# API ve Gizli Bilgiler
+# API Bilgileri
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.environ.get("CHAT_ID", "").strip()
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
-# Gemini SDK Yapılandırması
 client = genai.Client(api_key=GEMINI_KEY) if GEMINI_KEY else None
 
 SITELER = [
@@ -24,26 +23,16 @@ SITELER = [
 DB_FILE = "ilanlar_veritabani.json"
 
 def ai_analiz(metin):
-    """NLP kullanarak ilan metnini analiz eder"""
     if not client or not metin: return "Analiz yapılamadı."
     try:
-        # En stabil model ismi kullanıldı
-        prompt = f"""
-        Aşağıdaki iş/etkinlik ilanı metnini analiz et. 
-        Sadece şu 3 bilgiyi kısa ve net olarak Türkçe ver:
-        1. Son Başvuru Tarihi: (Metinden bul, yoksa 'Belirtilmemiş' yaz)
-        2. Kimler Başvurabilir: (Sınıf veya bölüm kriteri)
-        3. Öne Çıkan Şartlar: (Maksimum 2 madde)
-        
-        Metin: {metin[:3000]}
-        """
+        prompt = f"Aşağıdaki kariyer ilanını analiz et. Son başvuru tarihi, uygun sınıflar ve kısa bir özeti Türkçe yaz: {metin[:2500]}"
         response = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
         return response.text if response.text else "AI özet üretemedi."
     except Exception as e:
-        return f"AI Hatası: {str(e)[:50]}"
+        return f"AI Analiz Hatası: {str(e)[:50]}"
 
 async def telegram_send(mesaj):
-    if not mesaj or not TELEGRAM_TOKEN: return
+    if not mesaj: return
     clean_token = TELEGRAM_TOKEN.replace("bot", "")
     url = f"https://api.telegram.org/bot{clean_token}/sendMessage"
     requests.post(url, data={"chat_id": CHAT_ID, "text": mesaj, "parse_mode": "Markdown", "disable_web_page_preview": "true"})
@@ -57,67 +46,73 @@ async def main():
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
+        # Daha detaylı tarayıcı kimliği
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            viewport={'width': 1920, 'height': 1080},
+            extra_http_headers={"Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"}
         )
-        
+
         for site in SITELER:
             page = await context.new_page()
             try:
                 print(f"🔎 {site['isim']} taranıyor...")
-                await page.goto(site['url'], wait_until="domcontentloaded", timeout=60000)
+                # 'commit' bekleme stratejisiyle yükleme
+                await page.goto(site['url'], wait_until="load", timeout=90000)
                 
-                # Sitenin yüklenmesini bekle (JS tabanlı siteler için kritik)
-                try:
-                    await page.wait_for_selector(site['card'], timeout=15000)
-                except:
-                    print(f"⚠️ {site['isim']} için ilan kartları bulunamadı (Zaman aşımı).")
+                # Sayfayı yavaşça aşağı kaydır (içerik tetikleme)
+                for _ in range(3):
+                    await page.mouse.wheel(0, 500)
+                    await asyncio.sleep(1)
 
-                # Sayfayı kaydır
-                await page.evaluate("window.scrollTo(0, 800)")
-                await page.wait_for_timeout(2000)
+                # Elemanlar için bekleme süresini artırdık
+                try:
+                    await page.wait_for_selector(site['card'], timeout=30000)
+                except:
+                    print(f"⚠️ {site['isim']} kartları bulunamadı. Ekran görüntüsü alınıyor...")
+                    await page.screenshot(path=f"{site['isim']}_error.png")
+                    continue
 
                 cards = await page.query_selector_all(site['card'])
+                print(f"📊 {site['isim']}: {len(cards)} ilan görüldü.")
                 
-                # Hafıza hatasını önlemek için önce linkleri toplayalım
                 to_scan = []
-                for card in cards[:5]: # Her siteden en güncel 5 ilan
+                for card in cards[:5]: 
                     t_el = await card.query_selector(site['title'])
                     l_el = await card.query_selector(site['link'])
                     if t_el and l_el:
                         title = (await t_el.inner_text()).strip()
-                        link = urljoin(site['url'], await l_el.get_attribute("href"))
+                        href = await l_el.get_attribute("href")
+                        link = urljoin(site['url'], href)
                         if f"{site['isim']}-{title}" not in arsiv:
                             to_scan.append({"title": title, "link": link})
 
-                # Şimdi toplanan linklerin içine tek tek girip AI ile analiz edelim
                 for item in to_scan:
-                    print(f"🧠 {item['title']} analiz ediliyor...")
-                    await page.goto(item['link'], wait_until="domcontentloaded", timeout=30000)
-                    await page.wait_for_timeout(2000)
-                    
+                    print(f"🧠 {item['title']} inceleniyor...")
+                    await page.goto(item['link'], wait_until="domcontentloaded", timeout=40000)
+                    await page.wait_for_timeout(3000)
                     full_text = await page.inner_text("body")
                     analiz_notu = ai_analiz(full_text)
                     
-                    detay = f"📌 *{site['isim']}*\n📝 *{item['title']}*\n\n🤖 **AI ANALİZİ:**\n{analiz_notu}\n\n🔗 [İlana Gitmek İçin Tıkla]({item['link']})"
+                    detay = f"📌 *{site['isim']}*\n📝 *{item['title']}*\n\n🤖 *AI ÖZETİ:*\n{analiz_notu}\n\n🔗 [İlana Git]({item['link']})"
                     yeni_ilanlar.append(detay)
                     arsiv[f"{site['isim']}-{item['title']}"] = "analiz_edildi"
 
             except Exception as e:
-                print(f"⚠️ {site['isim']} Genel Hatası: {e}")
+                print(f"⚠️ {site['isim']} Hatası: {str(e)[:100]}")
             finally:
                 await page.close()
         
         await browser.close()
 
     if yeni_ilanlar:
-        mesaj_blogu = "🚀 **YAPAY ZEKA DESTEKLİ KARİYER LİSTESİ**\n\n"
-        for ilan in yeni_ilanlar:
-            if len(mesaj_blogu + ilan) > 3800:
-                await telegram_send(mesaj_blogu)
-                mesaj_blogu = "🚀 **LİSTE DEVAMI**\n\n"
-            mesaj_blogu += ilan + "\n\n---\n\n"
-        await telegram_send(mesaj_blogu)
+        msg = "🚀 **GÜNCEL KARİYER RAPORU**\n\n"
+        for i in yeni_ilanlar:
+            if len(msg + i) > 3900:
+                await telegram_send(msg)
+                msg = ""
+            msg += i + "\n\n---\n\n"
+        if msg: await telegram_send(msg)
         
         with open(DB_FILE, "w", encoding="utf-8") as f:
             json.dump(arsiv, f, indent=4, ensure_ascii=False)
