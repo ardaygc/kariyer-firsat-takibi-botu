@@ -17,7 +17,7 @@ SITELER = [
     {"isim": "Anbean", "url": "https://anbeankampus.co/ilanlar/", "card": ".joblistings-jobItem", "title": "h6", "link": "a"},
     {"isim": "Coderspace", "url": "https://coderspace.io/etkinlikler", "card": ".event-card", "title": "h5", "link": "h5 a"},
     {"isim": "Youthall", "url": "https://www.youthall.com/tr/jobs/", "card": ".jobs", "title": "h5", "link": "a"},
-    {"isim": "Boomerang", "url": "https://www.boomerang.careers/career-events", "card": "div.grid > div:has(h3)", "title": "h3", "link": "a"}
+    {"isim": "Boomerang", "url": "https://www.boomerang.careers/career-events", "card": ".grid > div", "title": "h3", "link": "a"}
 ]
 
 DB_FILE = "ilanlar_veritabani.json"
@@ -29,7 +29,7 @@ def ai_analiz(metin):
         response = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
         return response.text if response.text else "AI özet üretemedi."
     except Exception as e:
-        return f"AI Analiz Hatası: {str(e)[:50]}"
+        return f"AI Hatası: {str(e)[:50]}"
 
 async def telegram_send(mesaj):
     if not mesaj: return
@@ -46,32 +46,35 @@ async def main():
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        # Daha detaylı tarayıcı kimliği
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-            viewport={'width': 1920, 'height': 1080},
-            extra_http_headers={"Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"}
+            viewport={'width': 1920, 'height': 1080}
         )
+        
+        # --- KRİTİK GİZLİLİK ENJEKSİYONU ---
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            window.chrome = { runtime: {} };
+            Object.defineProperty(navigator, 'languages', {get: () => ['tr-TR', 'tr', 'en-US', 'en']});
+        """)
 
         for site in SITELER:
             page = await context.new_page()
             try:
                 print(f"🔎 {site['isim']} taranıyor...")
-                # 'commit' bekleme stratejisiyle yükleme
-                await page.goto(site['url'], wait_until="load", timeout=90000)
+                await page.goto(site['url'], wait_until="networkidle", timeout=60000)
                 
-                # Sayfayı yavaşça aşağı kaydır (içerik tetikleme)
-                for _ in range(3):
-                    await page.mouse.wheel(0, 500)
+                # Sayfayı yavaşça aşağı kaydır (Lazy load tetikleme)
+                for _ in range(5):
+                    await page.mouse.wheel(0, 400)
                     await asyncio.sleep(1)
 
-                # Elemanlar için bekleme süresini artırdık
+                # Eleman beklerken timeout süresini uzattık
                 try:
-                    await page.wait_for_selector(site['card'], timeout=30000)
+                    await page.wait_for_selector(site['card'], timeout=20000)
                 except:
-                    print(f"⚠️ {site['isim']} kartları bulunamadı. Ekran görüntüsü alınıyor...")
-                    await page.screenshot(path=f"{site['isim']}_error.png")
-                    continue
+                    print(f"⚠️ {site['isim']} kartları bulunamadı. Alternatif bekleniyor...")
+                    await page.wait_for_timeout(5000)
 
                 cards = await page.query_selector_all(site['card'])
                 print(f"📊 {site['isim']}: {len(cards)} ilan görüldü.")
@@ -99,14 +102,14 @@ async def main():
                     arsiv[f"{site['isim']}-{item['title']}"] = "analiz_edildi"
 
             except Exception as e:
-                print(f"⚠️ {site['isim']} Hatası: {str(e)[:100]}")
+                print(f"⚠️ {site['isim']} Hatası: {str(e)[:50]}")
             finally:
                 await page.close()
         
         await browser.close()
 
     if yeni_ilanlar:
-        msg = "🚀 **GÜNCEL KARİYER RAPORU**\n\n"
+        msg = "🚀 **GÜNCEL FIRSATLAR LİSTESİ**\n\n"
         for i in yeni_ilanlar:
             if len(msg + i) > 3900:
                 await telegram_send(msg)
